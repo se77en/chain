@@ -75,4 +75,10 @@ var migrations = []migration{
 	{Name: "2017-01-05.0.core.rename_block_key.sql", SQL: `
 		ALTER TABLE config RENAME COLUMN block_xpub TO block_pub;
 	`},
+	{Name: "2017-01-06.0.core.config-key.sql", SQL: `
+		ALTER TABLE config ALTER COLUMN block_pub DROP DEFAULT;
+		ALTER TABLE config
+			ALTER COLUMN block_pub SET DATA TYPE bytea USING decode(block_pub,'hex'),
+			ALTER COLUMN block_pub SET DEFAULT '\x';
+	`},
 }

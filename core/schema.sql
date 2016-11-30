@@ -2,8 +2,8 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 9.5.2
--- Dumped by pg_dump version 9.5.2
+-- Dumped from database version 9.5.0
+-- Dumped by pg_dump version 9.5.0
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -342,7 +342,7 @@ CREATE TABLE config (
     blockchain_id text NOT NULL,
     configured_at timestamp with time zone NOT NULL,
     generator_url text DEFAULT ''::text NOT NULL,
-    block_pub text DEFAULT ''::text NOT NULL,
+    block_pub bytea DEFAULT '\x'::bytea NOT NULL,
     remote_block_signers bytea DEFAULT '\x'::bytea NOT NULL,
     generator_access_token text DEFAULT ''::text NOT NULL,
     max_issuance_window_ms bigint,
@@ -877,3 +877,4 @@ insert into migrations (filename, hash) values ('2016-11-22.0.account.utxos-inde
 insert into migrations (filename, hash) values ('2016-11-23.0.query.jsonb-path-ops.sql', 'adb15b9a6b7b223a17dbfd5f669e44c500b343568a563f87e1ae67ba0f938d55');
 insert into migrations (filename, hash) values ('2016-11-28.0.core.submitted-txs-hash.sql', 'cabbd7fd79a2b672b2d3c854783bde3b8245fe666c50261c3335a0c0501ff2ea');
 insert into migrations (filename, hash) values ('2017-01-05.0.core.rename_block_key.sql', 'ba6a62e498236ec9d2f13238a945829a5cab83f897068fef57a2c152a2e36037');
+insert into migrations (filename, hash) values ('2017-01-06.0.core.config-key.sql', '0ebc08a7e27c944708b40a760a35025909d80378cf4e47f36cabc85e19b2cfa3');
