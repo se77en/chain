@@ -22,11 +22,17 @@ type State struct {
 	nextNodeID   uint64
 }
 
+// New returns a new State
+func New() *State {
+	return &State{
+		state:      make(map[string]string),
+		peers:      make(map[uint64]string),
+		nextNodeID: 2,
+	}
+}
+
 // SetPeerAddr sets the address for the given peer.
 func (s *State) SetPeerAddr(id uint64, addr string) {
-	if s.peers == nil {
-		s.peers = make(map[uint64]string)
-	}
 	s.peers[id] = addr
 }
 
@@ -37,9 +43,6 @@ func (s *State) GetPeerAddr(id uint64) (addr string) {
 
 // RemovePeerAddr deletes the current address for the given peer if it exists.
 func (s *State) RemovePeerAddr(id uint64) {
-	if s.peers == nil {
-		return
-	}
 	delete(s.peers, id)
 }
 
@@ -48,12 +51,6 @@ func (s *State) RemovePeerAddr(id uint64) {
 // when bootstrapping a new node from an existing cluster
 // or when recovering from a file on disk.
 func (s *State) RestoreSnapshot(data []byte, index uint64) error {
-	if s.peers == nil {
-		s.peers = make(map[uint64]string)
-	}
-	if s.state == nil {
-		s.state = make(map[string]string)
-	}
 	s.appliedIndex = index
 	// TODO(kr): figure out a better snapshot encoding
 	err := json.Unmarshal(data, s)
@@ -76,13 +73,6 @@ func (s *State) Snapshot() ([]byte, uint64, error) {
 func (s *State) Apply(data []byte, index uint64) (satisfied bool, err error) {
 	if index < s.appliedIndex {
 		return false, ErrAlreadyApplied
-	}
-	if s.state == nil {
-		s.state = make(map[string]string)
-
-	}
-	if s.nextNodeID == 0 {
-		s.nextNodeID = 2 //1 is used by first node on init
 	}
 	// TODO(kr): figure out a better entry encoding
 	var x interface{}
@@ -137,9 +127,6 @@ func (s *State) AppliedIndex() uint64 {
 
 // IDCounter
 func (s *State) NextNodeID() uint64 {
-	if s.nextNodeID == 0 {
-		return 2 //1 is used by first node on init
-	}
 	return s.nextNodeID
 }
 

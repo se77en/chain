@@ -76,7 +76,7 @@ type Service struct {
 	// The actual replicated data set.
 	stateMu   sync.Mutex
 	stateCond sync.Cond
-	state     state.State
+	state     *state.State
 
 	// Current log position.
 	// access only from runUpdates goroutine
@@ -138,6 +138,7 @@ func Start(laddr, dir, bootURL string) (*Service, error) {
 		dir:         dir,
 		mux:         http.NewServeMux(),
 		raftStorage: raft.NewMemoryStorage(),
+		state:       state.New(),
 	}
 	sv.stateCond.L = &sv.stateMu
 
