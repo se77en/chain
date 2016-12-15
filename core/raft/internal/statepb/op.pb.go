@@ -7,9 +7,11 @@ Package statepb is a generated protocol buffer package.
 
 It is generated from these files:
 	op.proto
+	snapshot.proto
 
 It has these top-level messages:
 	Op
+	Snapshot
 */
 package statepb
 

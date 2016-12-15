@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/golang/protobuf/proto"
 
@@ -55,8 +54,12 @@ func (s *State) RemovePeerAddr(id uint64) {
 // or when recovering from a file on disk.
 func (s *State) RestoreSnapshot(data []byte, index uint64) error {
 	s.appliedIndex = index
-	// TODO(kr): figure out a better snapshot encoding
-	err := json.Unmarshal(data, s)
+	//TODO (ameets): think about having statepb in state for restore
+	snapshot := &statepb.Snapshot{}
+	err := proto.Unmarshal(data, snapshot)
+	s.peers = snapshot.Peers
+	s.state = snapshot.State
+	s.nextNodeID = snapshot.NextNodeId
 	log.Messagef(context.Background(), "decoded snapshot %#v (err %v)", s, err)
 	return errors.Wrap(err)
 }
@@ -65,8 +68,11 @@ func (s *State) RestoreSnapshot(data []byte, index uint64) error {
 // suitable for RestoreSnapshot.
 func (s *State) Snapshot() ([]byte, uint64, error) {
 	log.Messagef(context.Background(), "encoding snapshot %#v", s)
-	// TODO(kr): figure out a better snapshot encoding
-	data, err := json.Marshal(s)
+	data, err := proto.Marshal(&statepb.Snapshot{
+		NextNodeId: s.nextNodeID,
+		State:      s.state,
+		Peers:      s.peers,
+	})
 	return data, s.appliedIndex, errors.Wrap(err)
 }
 
