@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/golang/protobuf/proto"
+
+	"chain/core/raft/internal/statepb"
 	"chain/errors"
 	"chain/log"
 )
@@ -75,8 +78,8 @@ func (s *State) Apply(data []byte, index uint64) (satisfied bool, err error) {
 		return false, ErrAlreadyApplied
 	}
 	// TODO(kr): figure out a better entry encoding
-	var x interface{}
-	err = json.Unmarshal(data, &x)
+	op := &statepb.Op{}
+	err = proto.Unmarshal(data, op)
 	if err != nil {
 		// An error here indicates a malformed update
 		// was written to the raft log. We do version
@@ -85,16 +88,14 @@ func (s *State) Apply(data []byte, index uint64) (satisfied bool, err error) {
 		// all speaking the same version.
 		return false, errors.Wrap(err)
 	}
-	switch x := x.(type) {
-	case float64: //json doesn't unmarshal interface to uint64
-		if uint64(x) == s.nextNodeID {
+	switch op.Type {
+	case statepb.Op_INCREMENT_NEXT_NODE_ID:
+		if op.NextNodeId == s.nextNodeID {
 			s.nextNodeID++
 			satisfied = true
 		}
-	case map[string]interface{}:
-		for k, v := range x {
-			s.state[k] = v.(string)
-		}
+	case statepb.Op_SET:
+		s.state[op.Key] = op.Value
 		satisfied = true
 	default:
 		return false, errors.New("unknown operation type")
@@ -115,8 +116,12 @@ func (s *State) Get(key string) (value string) {
 func Set(key, value string) []byte {
 	// TODO(kr): make a way to delete things
 	// TODO(kr): we prob need other operations too, like conditional writes
-	// TODO(kr): figure out a better entry encoding
-	b, _ := json.Marshal(map[string]string{key: value}) // error can't happen
+	b, _ := proto.Marshal(&statepb.Op{
+		Type:  statepb.Op_SET,
+		Key:   key,
+		Value: value,
+	})
+
 	return b
 }
 
@@ -131,9 +136,10 @@ func (s *State) NextNodeID() uint64 {
 }
 
 func IncrementNextNodeID(oldID uint64) []byte {
-	//good enough for now - no other operation is an integer
-	//ideally have a type to represent the instructions
-	b, _ := json.Marshal(oldID) //error can't really happen
+	b, _ := proto.Marshal(&statepb.Op{
+		Type:       statepb.Op_INCREMENT_NEXT_NODE_ID,
+		NextNodeId: oldID,
+	})
 
 	return b
 }
