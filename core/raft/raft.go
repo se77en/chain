@@ -59,7 +59,7 @@ type Service struct {
 	mux     *http.ServeMux
 	rctxReq chan rctxReq
 	wctxReq chan wctxReq
-	done	chan struct{}
+	done    chan struct{}
 
 	errMu sync.Mutex
 	err   error
@@ -241,7 +241,7 @@ func (sv *Service) runUpdatesReady(rd raft.Ready, wal *wal.WAL, writers map[stri
 		// Only error here is snapshot too old;
 		// should be impossible.
 		// (And if it happens, it's permanent.)
-		     err = sv.raftStorage.ApplySnapshot(rd.Snapshot)
+		err = sv.raftStorage.ApplySnapshot(rd.Snapshot)
 		if err != nil {
 			panic(err)
 		}
@@ -251,14 +251,14 @@ func (sv *Service) runUpdatesReady(rd raft.Ready, wal *wal.WAL, writers map[stri
 	sv.raftStorage.Append(rd.Entries)
 	var lastEntryIndex uint64
 	for _, entry := range rd.CommittedEntries {
-			sv.applyEntry(entry, writers)
+		sv.applyEntry(entry, writers)
 		lastEntryIndex = entry.Index
 	}
 
 	// NOTE(kr): we must apply entries before sending messages,
 	// because some ConfChangeAddNode entries contain the address
 	// needed for subsequent messages.
-		sv.send(rd.Messages)
+	sv.send(rd.Messages)
 	if lastEntryIndex > sv.snapIndex+snapCount {
 		sv.redo(func() error {
 			return sv.triggerSnapshot()
@@ -291,17 +291,17 @@ func replyReadIndex(rdIndices map[string]chan uint64, readStates []raft.ReadStat
 // runUpdates runs forever, reading and processing updates from raft
 // onto local storage.
 func (sv *Service) runUpdates(wal *wal.WAL) {
-	defer func () {
+	defer func() {
 		v := recover()
-		if err, ok := v.(error); ok{
+		if err, ok := v.(error); ok {
 			sv.errMu.Lock()
 			sv.err = err
 			sv.errMu.Unlock()
-		}else if v != nil {
+		} else if v != nil {
 			panic(v)
-		}		
+		}
 	}()
-	defer sv.raftNode.Stop() 
+	defer sv.raftNode.Stop()
 	//TODO (ameets): check for done signal in channel select{}
 	defer close(sv.done)
 
@@ -324,6 +324,8 @@ func (sv *Service) runUpdates(wal *wal.WAL) {
 			} else {
 				writers[string(req.wctx)] = req.satisfied
 			}
+		case <-sv.done:
+			panic(errors.New("raft shutdown"))
 		}
 	}
 }
@@ -343,17 +345,17 @@ func (sv *Service) exec(ctx context.Context, instruction []byte) error {
 	}
 	req := wctxReq{wctx: prop.Wctx, satisfied: make(chan bool, 1)} //buffered channel
 	select {
-		case sv.wctxReq <- req:
-		case <- sv.done:
-			return error.New("raft shutdown")
+	case sv.wctxReq <- req:
+	case <-sv.done:
+		return errors.New("raft shutdown")
 	}
 	err = sv.raftNode.Propose(ctx, data)
 	if err != nil {
-	select {
-		case 	sv.wctxReq <- wctxReq{wctx: prop.Wctx}:
-		case <- sv.done:
-	}
-			return errors.Wrap(err)
+		select {
+		case sv.wctxReq <- wctxReq{wctx: prop.Wctx}:
+		case <-sv.done:
+		}
+		return errors.Wrap(err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute) //TODO realistic timeout
 	defer cancel()
@@ -409,24 +411,24 @@ func (sv *Service) Get(key string) (string, error) {
 	rctx := randID()
 	req := rctxReq{rctx: rctx, index: make(chan uint64, 1)}
 	select {
-		case sv.rctxReq <- req:
-		case <- sv.done:
-			return error.New("raft shutdown")
+	case sv.rctxReq <- req:
+	case <-sv.done:
+		return "", errors.New("raft shutdown")
 	}
 	err := sv.raftNode.ReadIndex(ctx, rctx)
 	if err != nil {
 		select {
-			case sv.rctxReq <- rctxReq{rctx: rctx}:
-			case <- sv.done:
+		case sv.rctxReq <- rctxReq{rctx: rctx}:
+		case <-sv.done:
 		}
 		return "", err
 	}
-	select { 
-		case idx := <-req.index:
-		case <- sv.done:
-			return err.New("raft shutdown")
+	select {
+	case idx := <-req.index:
+		sv.wait(idx)
+	case <-sv.done:
+		return "", errors.New("raft shutdown")
 	}
-	sv.wait(idx)
 	return sv.Stale().Get(key), nil
 }
 
@@ -618,8 +620,8 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) {
 			sv.state.SetPeerAddr(cc.NodeID, string(cc.Context))
 		case raftpb.ConfChangeRemoveNode:
 			if cc.NodeID == sv.id {
-				log.Write(context.Background(),"nodeID", cc.NodeID, "msg", "removed from cluster")
-				panic(errors.New("removed from cluster")) 
+				log.Write(context.Background(), "nodeID", cc.NodeID, "msg", "removed from cluster")
+				panic(errors.New("removed from cluster"))
 			}
 			sv.stateMu.Lock()
 			defer sv.stateMu.Unlock()
@@ -737,7 +739,7 @@ func (sv *Service) recover() (*wal.WAL, error) {
 	return wal, nil
 }
 
-func (sv *Service) getSnapshot() (*raftpb.Snapshot) {
+func (sv *Service) getSnapshot() *raftpb.Snapshot {
 	sv.stateMu.Lock()
 	data, index, err := sv.state.Snapshot()
 	sv.stateMu.Unlock()
