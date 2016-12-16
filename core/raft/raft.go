@@ -59,6 +59,7 @@ type Service struct {
 	mux     *http.ServeMux
 	rctxReq chan rctxReq
 	wctxReq chan wctxReq
+	done	chan struct{}
 
 	errMu sync.Mutex
 	err   error
@@ -233,34 +234,31 @@ func (sv *Service) runUpdatesReady(rd raft.Ready, wal *wal.WAL, writers map[stri
 				Term:  rd.Snapshot.Metadata.Term,
 			})
 		})
-		sv.redo(func() error {
-			return wal.ReleaseLockTo(rd.Snapshot.Metadata.Index)
-		})
+		err := wal.ReleaseLockTo(rd.Snapshot.Metadata.Index)
+		if err != nil {
+			panic(err)
+		}
 		// Only error here is snapshot too old;
 		// should be impossible.
 		// (And if it happens, it's permanent.)
-		sv.redo(func() error {
-			return sv.raftStorage.ApplySnapshot(rd.Snapshot)
-		})
+		     err = sv.raftStorage.ApplySnapshot(rd.Snapshot)
+		if err != nil {
+			panic(err)
+		}
 		sv.snapIndex = rd.Snapshot.Metadata.Index
 		sv.confState = rd.Snapshot.Metadata.ConfState
 	}
 	sv.raftStorage.Append(rd.Entries)
 	var lastEntryIndex uint64
 	for _, entry := range rd.CommittedEntries {
-		sv.redo(func() error {
-			return sv.applyEntry(entry, writers)
-		})
+			sv.applyEntry(entry, writers)
 		lastEntryIndex = entry.Index
 	}
 
 	// NOTE(kr): we must apply entries before sending messages,
 	// because some ConfChangeAddNode entries contain the address
 	// needed for subsequent messages.
-	sv.redo(func() error {
-		return sv.send(rd.Messages)
-	})
-
+		sv.send(rd.Messages)
 	if lastEntryIndex > sv.snapIndex+snapCount {
 		sv.redo(func() error {
 			return sv.triggerSnapshot()
@@ -293,6 +291,20 @@ func replyReadIndex(rdIndices map[string]chan uint64, readStates []raft.ReadStat
 // runUpdates runs forever, reading and processing updates from raft
 // onto local storage.
 func (sv *Service) runUpdates(wal *wal.WAL) {
+	defer func () {
+		v := recover()
+		if err, ok := v.(error); ok{
+			sv.errMu.Lock()
+			sv.err = err
+			sv.errMu.Unlock()
+		}else if v != nil {
+			panic(v)
+		}		
+	}()
+	defer sv.raftNode.Stop() 
+	//TODO (ameets): check for done signal in channel select{}
+	defer close(sv.done)
+
 	rdIndices := make(map[string]chan uint64)
 	writers := make(map[string]chan bool)
 	for {
@@ -330,11 +342,18 @@ func (sv *Service) exec(ctx context.Context, instruction []byte) error {
 		return errors.Wrap(err)
 	}
 	req := wctxReq{wctx: prop.Wctx, satisfied: make(chan bool, 1)} //buffered channel
-	sv.wctxReq <- req
+	select {
+		case sv.wctxReq <- req:
+		case <- sv.done:
+			return error.New("raft shutdown")
+	}
 	err = sv.raftNode.Propose(ctx, data)
 	if err != nil {
-		sv.wctxReq <- wctxReq{wctx: prop.Wctx}
-		return errors.Wrap(err)
+	select {
+		case 	sv.wctxReq <- wctxReq{wctx: prop.Wctx}:
+		case <- sv.done:
+	}
+			return errors.Wrap(err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute) //TODO realistic timeout
 	defer cancel()
@@ -389,17 +408,29 @@ func (sv *Service) Get(key string) (string, error) {
 	// TODO (ameets)[WIP] possibly refactor, maybe read while holding the lock?
 	rctx := randID()
 	req := rctxReq{rctx: rctx, index: make(chan uint64, 1)}
-	sv.rctxReq <- req
+	select {
+		case sv.rctxReq <- req:
+		case <- sv.done:
+			return error.New("raft shutdown")
+	}
 	err := sv.raftNode.ReadIndex(ctx, rctx)
 	if err != nil {
-		sv.rctxReq <- rctxReq{rctx: rctx}
+		select {
+			case sv.rctxReq <- rctxReq{rctx: rctx}:
+			case <- sv.done:
+		}
 		return "", err
 	}
-	idx := <-req.index
+	select { 
+		case idx := <-req.index:
+		case <- sv.done:
+			return err.New("raft shutdown")
+	}
 	sv.wait(idx)
 	return sv.Stale().Get(key), nil
 }
 
+//TODO change based on panic control flow
 func (sv *Service) wait(index uint64) {
 	sv.stateMu.Lock()
 	for sv.state.AppliedIndex() < index {
@@ -473,11 +504,7 @@ func (sv *Service) serveJoin(w http.ResponseWriter, req *http.Request) {
 
 	log.Write(req.Context(), "at", "join-done", "addr", x.Addr, "id", newID)
 
-	snap, err := sv.getSnapshot()
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
+	snap := sv.getSnapshot()
 	snapData, err := encodeSnapshot(snap)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -567,7 +594,7 @@ func (sv *Service) evict(nodeID uint64) {
 	//}
 }
 
-func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) error {
+func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) {
 	log.Write(context.Background(), "index", ent.Index, "ent", ent)
 
 	switch ent.Type {
@@ -575,7 +602,7 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) er
 		var cc raftpb.ConfChange
 		err := cc.Unmarshal(ent.Data)
 		if err != nil {
-			return errors.Wrap(err)
+			panic(err)
 		}
 		sv.raftNode.ApplyConfChange(cc)
 		switch cc.Type {
@@ -591,10 +618,8 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) er
 			sv.state.SetPeerAddr(cc.NodeID, string(cc.Context))
 		case raftpb.ConfChangeRemoveNode:
 			if cc.NodeID == sv.id {
-				// log.Println("I've been removed from the cluster! Shutting down.")
-				// TODO(kr): stop doing raft somehow?
-				// or attempt to rejoin as a new follower???
-				panic("evicted")
+				log.Write(context.Background(),"nodeID", cc.NodeID, "msg", "removed from cluster")
+				panic(errors.New("removed from cluster")) 
 			}
 			sv.stateMu.Lock()
 			defer sv.stateMu.Unlock()
@@ -610,11 +635,11 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) er
 		var p proposal
 		err := json.Unmarshal(ent.Data, &p)
 		if err != nil {
-			return errors.Wrap(err)
+			panic(err)
 		}
 		satisfied, err := sv.state.Apply(p.Operation, ent.Index)
 		if err != nil {
-			return errors.Wrap(err)
+			panic(err)
 		}
 		// send 'satisfied' over channel to caller
 		if c := writers[string(p.Wctx)]; c != nil {
@@ -622,17 +647,15 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) er
 			delete(writers, string(p.Wctx))
 		}
 	default:
-		return errors.Wrap(fmt.Errorf("unknown entry type: %v", ent))
+		panic(fmt.Errorf("unknown entry type: %v", ent))
 	}
-
-	return nil
 }
 
-func (sv *Service) send(msgs []raftpb.Message) error {
+func (sv *Service) send(msgs []raftpb.Message) {
 	for _, msg := range msgs {
 		data, err := msg.Marshal()
 		if err != nil {
-			return errors.Wrap(err)
+			panic(err)
 		}
 		sv.stateMu.Lock()
 		addr := sv.state.GetPeerAddr(msg.To)
@@ -643,7 +666,6 @@ func (sv *Service) send(msgs []raftpb.Message) error {
 		}
 		sendmsg(addr, data)
 	}
-	return nil
 }
 
 // best effort. if it fails, oh well -- that's why we're using raft.
@@ -709,32 +731,29 @@ func (sv *Service) recover() (*wal.WAL, error) {
 	sv.raftStorage.SetHardState(st)
 	sv.raftStorage.Append(ents)
 	for _, ent := range ents {
-		err = sv.applyEntry(ent, nil)
-		if err != nil {
-			return nil, err
-		}
+		sv.applyEntry(ent, nil)
 	}
 
 	return wal, nil
 }
 
-func (sv *Service) getSnapshot() (*raftpb.Snapshot, error) {
+func (sv *Service) getSnapshot() (*raftpb.Snapshot) {
 	sv.stateMu.Lock()
 	data, index, err := sv.state.Snapshot()
 	sv.stateMu.Unlock()
 	if err != nil {
-		return nil, errors.Wrap(err)
+		panic(err)
 	}
 	snap, err := sv.raftStorage.CreateSnapshot(index, &sv.confState, data)
-	return &snap, errors.Wrap(err)
+	if err != nil {
+		panic(err)
+	}
+	return &snap
 }
 
 func (sv *Service) triggerSnapshot() error {
-	snap, err := sv.getSnapshot()
-	if err != nil {
-		return errors.Wrap(err)
-	}
-	err = sv.saveSnapshot(snap)
+	snap := sv.getSnapshot()
+	err := sv.saveSnapshot(snap)
 	if err != nil {
 		return errors.Wrap(err)
 	}
@@ -745,7 +764,7 @@ func (sv *Service) triggerSnapshot() error {
 	}
 	err = sv.raftStorage.Compact(compactIndex)
 	if err != nil {
-		return errors.Wrap(err)
+		panic(err)
 	}
 	sv.snapIndex = snap.Metadata.Index
 	return nil
@@ -754,7 +773,7 @@ func (sv *Service) triggerSnapshot() error {
 func (sv *Service) saveSnapshot(snapshot *raftpb.Snapshot) error {
 	d, err := encodeSnapshot(snapshot)
 	if err != nil {
-		return errors.Wrap(err)
+		panic(err)
 	}
 	return writeFile(sv.snapFile(), d, 0666)
 }
