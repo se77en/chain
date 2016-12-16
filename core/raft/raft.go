@@ -59,7 +59,7 @@ type Service struct {
 	mux     *http.ServeMux
 	rctxReq chan rctxReq
 	wctxReq chan wctxReq
-	done    chan struct{}
+	donec    chan struct{}
 
 	errMu sync.Mutex
 	err   error
@@ -78,6 +78,7 @@ type Service struct {
 	stateMu   sync.Mutex
 	stateCond sync.Cond
 	state     *state.State
+	done	bool
 
 	// Current log position.
 	// access only from runUpdates goroutine
@@ -300,10 +301,14 @@ func (sv *Service) runUpdates(wal *wal.WAL) {
 		} else if v != nil {
 			panic(v)
 		}
+
+		sv.stateMu.Lock()
+		sv.done = true
+		sv.stateMu.Unlock()
+		sv.stateCond.Broadcast()
 	}()
 	defer sv.raftNode.Stop()
-	//TODO (ameets): check for done signal in channel select{}
-	defer close(sv.done)
+	defer close(sv.donec)
 
 	rdIndices := make(map[string]chan uint64)
 	writers := make(map[string]chan bool)
@@ -324,8 +329,6 @@ func (sv *Service) runUpdates(wal *wal.WAL) {
 			} else {
 				writers[string(req.wctx)] = req.satisfied
 			}
-		case <-sv.done:
-			panic(errors.New("raft shutdown"))
 		}
 	}
 }
@@ -346,14 +349,14 @@ func (sv *Service) exec(ctx context.Context, instruction []byte) error {
 	req := wctxReq{wctx: prop.Wctx, satisfied: make(chan bool, 1)} //buffered channel
 	select {
 	case sv.wctxReq <- req:
-	case <-sv.done:
+	case <-sv.donec:
 		return errors.New("raft shutdown")
 	}
 	err = sv.raftNode.Propose(ctx, data)
 	if err != nil {
 		select {
 		case sv.wctxReq <- wctxReq{wctx: prop.Wctx}:
-		case <-sv.done:
+		case <-sv.donec:
 		}
 		return errors.Wrap(err)
 	}
@@ -368,7 +371,10 @@ func (sv *Service) exec(ctx context.Context, instruction []byte) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-sv.donec:
+                return errors.New("raft shutdown")
 	}
+	
 }
 
 // Set sets a value in the key-value storage.
@@ -412,33 +418,37 @@ func (sv *Service) Get(key string) (string, error) {
 	req := rctxReq{rctx: rctx, index: make(chan uint64, 1)}
 	select {
 	case sv.rctxReq <- req:
-	case <-sv.done:
+	case <-sv.donec:
 		return "", errors.New("raft shutdown")
 	}
 	err := sv.raftNode.ReadIndex(ctx, rctx)
 	if err != nil {
 		select {
 		case sv.rctxReq <- rctxReq{rctx: rctx}:
-		case <-sv.done:
+		case <-sv.donec:
 		}
 		return "", err
 	}
 	select {
 	case idx := <-req.index:
-		sv.wait(idx)
-	case <-sv.done:
+		ok := sv.wait(idx)
+		if !ok {
+			return "", errors.New("raft shutdown")
+		}
+	case <-sv.donec:
 		return "", errors.New("raft shutdown")
 	}
 	return sv.Stale().Get(key), nil
 }
 
 //TODO change based on panic control flow
-func (sv *Service) wait(index uint64) {
+func (sv *Service) wait(index uint64) bool {
 	sv.stateMu.Lock()
-	for sv.state.AppliedIndex() < index {
+	defer sv.stateMu.Unlock()
+	for !sv.done && sv.state.AppliedIndex() < index {
 		sv.stateCond.Wait()
 	}
-	sv.stateMu.Unlock()
+	return sv.state.AppliedIndex() >= index //if false killed b/c of done signal
 }
 
 // Stale returns an object that reads
