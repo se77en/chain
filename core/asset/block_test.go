@@ -46,19 +46,23 @@ func TestIndexNonLocalAssets(t *testing.T) {
 						{ // non-local asset
 							AssetVersion: 1,
 							TypedInput: &bc.IssuanceInput{
-								InitialBlock:    r.initialBlockHash,
-								Amount:          10000,
-								IssuanceProgram: issuanceProgram,
-								VMVersion:       1,
+								Amount: 10000,
+								AssetWitness: bc.AssetWitness{
+									InitialBlock:    r.initialBlockHash,
+									IssuanceProgram: issuanceProgram,
+									VMVersion:       1,
+								},
 							},
 						},
 						{ // local asset
 							AssetVersion: 1,
 							TypedInput: &bc.IssuanceInput{
-								InitialBlock:    r.initialBlockHash,
-								Amount:          10000,
-								IssuanceProgram: local.IssuanceProgram,
-								VMVersion:       1,
+								Amount: 10000,
+								AssetWitness: bc.AssetWitness{
+									InitialBlock:    r.initialBlockHash,
+									IssuanceProgram: local.IssuanceProgram,
+									VMVersion:       1,
+								},
 							},
 						},
 					},
