@@ -740,10 +740,6 @@ func (sv *Service) recover() (*wal.WAL, error) {
 
 	sv.raftStorage.SetHardState(st)
 	sv.raftStorage.Append(ents)
-	for _, ent := range ents {
-		sv.applyEntry(ent, nil)
-	}
-
 	return wal, nil
 }
 
