@@ -6,7 +6,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	"chain/core/raft/internal/statepb"
+	"chain/database/raft/internal/statepb"
 	"chain/errors"
 	"chain/log"
 )

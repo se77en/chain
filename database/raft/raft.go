@@ -26,7 +26,7 @@ import (
 	"github.com/coreos/etcd/wal"
 	"github.com/coreos/etcd/wal/walpb"
 
-	"chain/core/raft/state"
+	"chain/database/raft/state"
 	"chain/errors"
 	"chain/log"
 )

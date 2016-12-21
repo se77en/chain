@@ -32,7 +32,7 @@ import (
 	"chain/core/mockhsm"
 	"chain/core/pin"
 	"chain/core/query"
-	"chain/core/raft"
+	"chain/database/raft"
 	"chain/core/rpc"
 	"chain/core/txbuilder"
 	"chain/core/txdb"
