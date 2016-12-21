@@ -191,7 +191,7 @@ func (h *Handler) init() {
 	h.handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		// TODO(kr): remove this debugging hack
 		if req.URL.Path == "/raft/debugset" {
-			err := h.RaftDB.Set(req.Context(), "a", "b")
+			err := h.RaftDB.Set(req.Context(), "a", []byte("b"))
 			if err != nil {
 				log.Println(err)
 			}
