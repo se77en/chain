@@ -59,7 +59,7 @@ type Service struct {
 	mux     *http.ServeMux
 	rctxReq chan rctxReq
 	wctxReq chan wctxReq
-	donec    chan struct{}
+	donec   chan struct{}
 
 	errMu sync.Mutex
 	err   error
@@ -78,7 +78,7 @@ type Service struct {
 	stateMu   sync.Mutex
 	stateCond sync.Cond
 	state     *state.State
-	done	bool
+	done      bool
 
 	// Current log position.
 	// access only from runUpdates goroutine
@@ -103,7 +103,7 @@ type proposal struct {
 
 // Getter gets a value from a key-value store.
 type Getter interface {
-	Get(key string) (value string)
+	Get(key string) (value []byte)
 }
 
 // Start starts the raft algorithm.
@@ -372,16 +372,16 @@ func (sv *Service) exec(ctx context.Context, instruction []byte) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-sv.donec:
-                return errors.New("raft shutdown")
+		return errors.New("raft shutdown")
 	}
-	
+
 }
 
 // Set sets a value in the key-value storage.
 // If successful, it returns after the value is committed to
 // the raft log.
 // TODO (ameets): possibly RawNode in future to know whether Proposal worked or not
-func (sv *Service) Set(ctx context.Context, key, val string) error {
+func (sv *Service) Set(ctx context.Context, key string, val []byte) error {
 	// encode w/ json for now: b with a wctx rand id
 	b := state.Set(key, val)
 	return sv.exec(ctx, b)
@@ -392,12 +392,12 @@ func (sv *Service) allocNodeID(ctx context.Context) (uint64, error) {
 	// encode w/ json for now: b with a wctx rand id
 	// lock state via mutex to pull nextID val, then call increment
 	err := ErrUnsatisfied
-	var nextID uint64
+	var nextID, index uint64
 	for err == ErrUnsatisfied {
 		sv.stateMu.Lock()
-		nextID = sv.state.NextNodeID()
+		nextID, index = sv.state.NextNodeID()
 		sv.stateMu.Unlock()
-		b := state.IncrementNextNodeID(nextID)
+		b := state.IncrementNextNodeID(nextID, index)
 		err = sv.exec(ctx, b)
 	}
 	return nextID, err //caller should check for error b/c value of nextID is untrustworthy in that case
@@ -411,7 +411,7 @@ func (sv *Service) allocNodeID(ctx context.Context) (uint64, error) {
 // Set won't have changed the value again, but it is
 // guaranteed not to read stale data.)
 // This can be slow; for faster but possibly stale reads, see Stale.
-func (sv *Service) Get(key string) (string, error) {
+func (sv *Service) Get(key string) ([]byte, error) {
 	ctx := context.TODO()
 	// TODO (ameets)[WIP] possibly refactor, maybe read while holding the lock?
 	rctx := randID()
@@ -419,7 +419,7 @@ func (sv *Service) Get(key string) (string, error) {
 	select {
 	case sv.rctxReq <- req:
 	case <-sv.donec:
-		return "", errors.New("raft shutdown")
+		return nil, errors.New("raft shutdown")
 	}
 	err := sv.raftNode.ReadIndex(ctx, rctx)
 	if err != nil {
@@ -427,21 +427,20 @@ func (sv *Service) Get(key string) (string, error) {
 		case sv.rctxReq <- rctxReq{rctx: rctx}:
 		case <-sv.donec:
 		}
-		return "", err
+		return nil, err
 	}
 	select {
 	case idx := <-req.index:
 		ok := sv.wait(idx)
 		if !ok {
-			return "", errors.New("raft shutdown")
+			return nil, errors.New("raft shutdown")
 		}
 	case <-sv.donec:
-		return "", errors.New("raft shutdown")
+		return nil, errors.New("raft shutdown")
 	}
 	return sv.Stale().Get(key), nil
 }
 
-//TODO change based on panic control flow
 func (sv *Service) wait(index uint64) bool {
 	sv.stateMu.Lock()
 	defer sv.stateMu.Unlock()
@@ -636,7 +635,6 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) {
 			sv.stateMu.Lock()
 			defer sv.stateMu.Unlock()
 			defer sv.stateCond.Broadcast()
-			// TODO (ameets): if synchro stuff goes away don't need locking
 			sv.state.RemovePeerAddr(cc.NodeID)
 		}
 	case raftpb.EntryNormal:
@@ -837,7 +835,7 @@ func (sv *Service) redo(f func() error) {
 
 type staleGetter Service
 
-func (g *staleGetter) Get(key string) string {
+func (g *staleGetter) Get(key string) []byte {
 	g.stateMu.Lock()
 	defer g.stateMu.Unlock()
 	return g.state.Get(key)

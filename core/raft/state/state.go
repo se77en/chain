@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 
 	"github.com/golang/protobuf/proto"
@@ -10,26 +11,26 @@ import (
 	"chain/log"
 )
 
-var ErrAlreadyApplied = errors.New("entry already applied")
+const nextNodeID = "raft/nextNodeID"
 
-// TODO(kr): what data type should we really use?
+var ErrAlreadyApplied = errors.New("entry already applied")
 
 // State is a general-purpose data store designed to accumulate
 // and apply replicated updates from a raft log.
 // The zero value is an empty State ready to use.
 type State struct {
-	state        map[string]string
+	state        map[string][]byte
 	peers        map[uint64]string // id -> addr
 	appliedIndex uint64
-	nextNodeID   uint64
+	version      map[string]uint64 //key -> value index
 }
 
 // New returns a new State
 func New() *State {
 	return &State{
-		state:      make(map[string]string),
-		peers:      make(map[uint64]string),
-		nextNodeID: 2,
+		state:   map[string][]byte{nextNodeID: []byte("2")},
+		peers:   make(map[uint64]string),
+		version: make(map[string]uint64),
 	}
 }
 
@@ -58,8 +59,7 @@ func (s *State) RestoreSnapshot(data []byte, index uint64) error {
 	snapshot := &statepb.Snapshot{}
 	err := proto.Unmarshal(data, snapshot)
 	s.peers = snapshot.Peers
-	s.state = snapshot.State
-	s.nextNodeID = snapshot.NextNodeId
+	s.state = snapshot.State //TODO (ameets): need to add version here
 	log.Messagef(context.Background(), "decoded snapshot %#v (err %v)", s, err)
 	return errors.Wrap(err)
 }
@@ -69,9 +69,8 @@ func (s *State) RestoreSnapshot(data []byte, index uint64) error {
 func (s *State) Snapshot() ([]byte, uint64, error) {
 	log.Messagef(context.Background(), "encoding snapshot %#v", s)
 	data, err := proto.Marshal(&statepb.Snapshot{
-		NextNodeId: s.nextNodeID,
-		State:      s.state,
-		Peers:      s.peers,
+		State: s.state,
+		Peers: s.peers,
 	})
 	return data, s.appliedIndex, errors.Wrap(err)
 }
@@ -83,9 +82,8 @@ func (s *State) Apply(data []byte, index uint64) (satisfied bool, err error) {
 	if index < s.appliedIndex {
 		return false, ErrAlreadyApplied
 	}
-	// TODO(kr): figure out a better entry encoding
-	op := &statepb.Op{}
-	err = proto.Unmarshal(data, op)
+	instr := &statepb.Instruction{}
+	err = proto.Unmarshal(data, instr)
 	if err != nil {
 		// An error here indicates a malformed update
 		// was written to the raft log. We do version
@@ -94,38 +92,66 @@ func (s *State) Apply(data []byte, index uint64) (satisfied bool, err error) {
 		// all speaking the same version.
 		return false, errors.Wrap(err)
 	}
-	switch op.Type {
-	case statepb.Op_INCREMENT_NEXT_NODE_ID:
-		if op.NextNodeId == s.nextNodeID {
-			s.nextNodeID++
-			satisfied = true
-		}
-	case statepb.Op_SET:
-		s.state[op.Key] = op.Value
-		satisfied = true
-	default:
-		return false, errors.New("unknown operation type")
-	}
 
 	s.appliedIndex = index
-	return satisfied, nil
+	for _, cond := range instr.Conditions {
+		y := true
+		switch cond.Type {
+
+		case statepb.Cond_NOT_KEY_EXISTS:
+			y = false
+			fallthrough
+		case statepb.Cond_KEY_EXISTS:
+			if _, ok := s.state[cond.Key]; ok != y {
+				return false, nil
+			}
+		case statepb.Cond_NOT_VALUE_EQUAL:
+			y = false
+			fallthrough
+		case statepb.Cond_VALUE_EQUAL:
+			if ok := bytes.Equal(s.state[cond.Key], cond.Value); ok != y {
+				return false, nil
+			}
+		case statepb.Cond_NOT_INDEX_EQUAL:
+			y = false
+			fallthrough
+		case statepb.Cond_INDEX_EQUAL:
+			if ok := (s.version[cond.Key] == cond.Index); ok != y {
+				return false, nil
+			}
+		default:
+			return false, errors.New("unknown condition type")
+		}
+	}
+	for _, op := range instr.Operations {
+		switch op.Type {
+		case statepb.Op_SET:
+			s.state[op.Key] = op.Value
+			s.version[op.Key] = index
+		default:
+			return false, errors.New("unknown operation type")
+		}
+	}
+
+	return true, nil
 }
 
 // Provisional read operation.
-func (s *State) Get(key string) (value string) {
+func (s *State) Get(key string) (value []byte) {
 	return s.state[key]
 }
 
 // Set encodes a set operation setting key to value.
 // The encoded op should be committed to the raft log,
 // then it can be applied with Apply.
-func Set(key, value string) []byte {
+func Set(key string, value []byte) (instruction []byte) {
 	// TODO(kr): make a way to delete things
-	// TODO(kr): we prob need other operations too, like conditional writes
-	b, _ := proto.Marshal(&statepb.Op{
-		Type:  statepb.Op_SET,
-		Key:   key,
-		Value: value,
+	b, _ := proto.Marshal(&statepb.Instruction{
+		Operations: []*statepb.Op{{
+			Type:  statepb.Op_SET,
+			Key:   key,
+			Value: value,
+		}},
 	})
 
 	return b
@@ -137,14 +163,25 @@ func (s *State) AppliedIndex() uint64 {
 }
 
 // IDCounter
-func (s *State) NextNodeID() uint64 {
-	return s.nextNodeID
+func (s *State) NextNodeID() (id, version uint64) {
+	id, n := proto.DecodeVarint(s.state[nextNodeID])
+	if n == 0 {
+		panic("raft: cannot decode nextNodeID")
+	}
+	return id, s.version[nextNodeID]
 }
 
-func IncrementNextNodeID(oldID uint64) []byte {
-	b, _ := proto.Marshal(&statepb.Op{
-		Type:       statepb.Op_INCREMENT_NEXT_NODE_ID,
-		NextNodeId: oldID,
+func IncrementNextNodeID(oldID uint64, index uint64) (instruction []byte) {
+	b, _ := proto.Marshal(&statepb.Instruction{
+		Conditions: []*statepb.Cond{{
+			Type:  statepb.Cond_INDEX_EQUAL,
+			Index: index,
+		}},
+		Operations: []*statepb.Op{{
+			Type:  statepb.Op_SET,
+			Key:   nextNodeID,
+			Value: proto.EncodeVarint(oldID + 1),
+		}},
 	})
 
 	return b
