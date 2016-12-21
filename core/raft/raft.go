@@ -97,8 +97,8 @@ type wctxReq struct {
 }
 
 type proposal struct {
-	Wctx      []byte
-	Operation []byte
+	Wctx        []byte
+	Instruction []byte
 }
 
 // Getter gets a value from a key-value store.
@@ -341,7 +341,7 @@ func runTicks(rn raft.Node) {
 
 //
 func (sv *Service) exec(ctx context.Context, instruction []byte) error {
-	prop := proposal{Wctx: randID(), Operation: instruction}
+	prop := proposal{Wctx: randID(), Instruction: instruction}
 	data, err := json.Marshal(prop)
 	if err != nil {
 		return errors.Wrap(err)
@@ -647,7 +647,7 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) {
 		if err != nil {
 			panic(err)
 		}
-		satisfied, err := sv.state.Apply(p.Operation, ent.Index)
+		satisfied, err := sv.state.Apply(p.Instruction, ent.Index)
 		if err != nil {
 			panic(err)
 		}
