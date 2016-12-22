@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,9 @@ func Start(laddr, dir, bootURL string) (*Service, error) {
 		mux:         http.NewServeMux(),
 		raftStorage: raft.NewMemoryStorage(),
 		state:       state.New(),
+		donec:       make(chan struct{}),
+		rctxReq:     make(chan rctxReq),
+		wctxReq:     make(chan wctxReq),
 	}
 	sv.stateCond.L = &sv.stateMu
 
@@ -298,6 +302,8 @@ func (sv *Service) runUpdates(wal *wal.WAL) {
 			sv.errMu.Lock()
 			sv.err = err
 			sv.errMu.Unlock()
+			log.Messagef(context.Background(), "raft exiting: %v", err)
+			debug.PrintStack()
 		} else if v != nil {
 			panic(v)
 		}
@@ -309,6 +315,7 @@ func (sv *Service) runUpdates(wal *wal.WAL) {
 	}()
 	defer sv.raftNode.Stop()
 	defer close(sv.donec)
+	defer log.Messagef(context.Background(), "ats:got here deferred")
 
 	rdIndices := make(map[string]chan uint64)
 	writers := make(map[string]chan bool)
@@ -331,6 +338,7 @@ func (sv *Service) runUpdates(wal *wal.WAL) {
 			}
 		}
 	}
+	log.Messagef(context.Background(), "ats:got here")
 }
 
 func runTicks(rn raft.Node) {
@@ -396,6 +404,7 @@ func (sv *Service) allocNodeID(ctx context.Context) (uint64, error) {
 	for err == ErrUnsatisfied {
 		sv.stateMu.Lock()
 		nextID, index = sv.state.NextNodeID()
+		log.Messagef(ctx, "raft: attempting to allocate nodeID %d at version %d", nextID, index)
 		sv.stateMu.Unlock()
 		b := state.IncrementNextNodeID(nextID, index)
 		err = sv.exec(ctx, b)
@@ -639,12 +648,18 @@ func (sv *Service) applyEntry(ent raftpb.Entry, writers map[string]chan bool) {
 		}
 	case raftpb.EntryNormal:
 		log.Write(context.Background(), "EntryNormal", ent)
+		//raft will send empty request defaulted to EntryNormal on leader election
+		//we need to handle that here
+		if ent.Data == nil {
+			break
+		}
 		sv.stateMu.Lock()
 		defer sv.stateCond.Broadcast()
 		defer sv.stateMu.Unlock()
 		var p proposal
 		err := json.Unmarshal(ent.Data, &p)
 		if err != nil {
+			log.Messagef(context.Background(), "ent.data: %q", ent.Data)
 			panic(err)
 		}
 		satisfied, err := sv.state.Apply(p.Instruction, ent.Index)

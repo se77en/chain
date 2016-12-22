@@ -93,6 +93,7 @@ func (s *State) Apply(data []byte, index uint64) (satisfied bool, err error) {
 		return false, errors.Wrap(err)
 	}
 
+	log.Messagef(context.Background(), "state instruction: %v", instr)
 	s.appliedIndex = index
 	for _, cond := range instr.Conditions {
 		y := true
@@ -175,6 +176,7 @@ func IncrementNextNodeID(oldID uint64, index uint64) (instruction []byte) {
 	b, _ := proto.Marshal(&statepb.Instruction{
 		Conditions: []*statepb.Cond{{
 			Type:  statepb.Cond_INDEX_EQUAL,
+			Key:   nextNodeID,
 			Index: index,
 		}},
 		Operations: []*statepb.Op{{
